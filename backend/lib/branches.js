@@ -1,4 +1,4 @@
-const { supabase } = require('../config/database')
+const { query } = require('../config/database')
 const { BRANCHES } = require('../constants/branches')
 
 let cachedAcronyms = null
@@ -10,8 +10,11 @@ async function getValidAcronyms() {
     return cachedAcronyms
   }
   try {
-    const { data, error } = await supabase.from('branches').select('acronym')
-    if (!error && data && data.length > 0) {
+    const data = await query('branches', 'select', {
+      select: 'acronym',
+      orderBy: { column: 'acronym', ascending: true }
+    })
+    if (data && data.length > 0) {
       cachedAcronyms = new Set(data.map((r) => r.acronym))
       cacheTime = Date.now()
       return cachedAcronyms

@@ -118,19 +118,15 @@ router.put('/:id/read', authenticate, async (req, res) => {
 router.put('/read-all', authenticate, async (req, res) => {
   try {
     const userId = req.user.id
-    
-    // Use direct Supabase client for efficient bulk update
-    const { supabase } = require('../config/database')
-    const { error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('user_id', userId)
-      .eq('is_read', false)
-    
-    if (error) {
-      throw error
-    }
-    
+
+    await query('notifications', 'update', {
+      data: { is_read: true },
+      filters: [
+        { column: 'user_id', operator: 'eq', value: userId },
+        { column: 'is_read', operator: 'eq', value: false }
+      ]
+    })
+
     res.json({ message: 'All notifications marked as read' })
   } catch (error) {
     console.error('Mark all read error:', error)

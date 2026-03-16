@@ -1,5 +1,5 @@
 const express = require('express')
-const { supabase } = require('../config/database')
+const { query } = require('../config/database')
 const { authenticate, authorize } = require('../middleware/auth')
 
 const router = express.Router()
@@ -9,11 +9,10 @@ const { invalidateCache } = require('../lib/branches')
 // Get all branches (authenticated users)
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('branches')
-      .select('acronym, name')
-      .order('acronym')
-    if (error) throw error
+    const data = await query('branches', 'select', {
+      select: 'acronym, name',
+      orderBy: { column: 'acronym', ascending: true }
+    })
     if (!data || data.length === 0) {
       return res.json(BRANCHES.map((b) => ({ acronym: b.acronym, name: b.name })))
     }
@@ -36,19 +35,21 @@ router.post('/', authenticate, authorize('admin'), async (req, res) => {
     if (a.length > 10) {
       return res.status(400).json({ message: 'Acronym must be 10 characters or less' })
     }
-    const { data, error } = await supabase
-      .from('branches')
-      .insert({ acronym: a, name: n })
-      .select()
-      .single()
-    if (error) {
-      if (error.code === '23505') {
-        return res.status(400).json({ message: 'A branch with this acronym already exists' })
-      }
-      throw error
+    // Check for existing acronym
+    const existing = await query('branches', 'select', {
+      filters: [{ column: 'acronym', value: a }],
+      single: true
+    })
+    if (existing) {
+      return res.status(400).json({ message: 'A branch with this acronym already exists' })
     }
+
+    await query('branches', 'insert', {
+      data: { acronym: a, name: n }
+    })
+
     invalidateCache()
-    res.status(201).json(data)
+    res.status(201).json({ acronym: a, name: n })
   } catch (err) {
     console.error('Add branch error:', err)
     res.status(500).json({ message: 'Failed to add branch' })
@@ -65,8 +66,9 @@ router.delete('/:acronym', authenticate, authorize('admin'), async (req, res) =>
     if (acronym === 'ALL') {
       return res.status(400).json({ message: 'Cannot delete the All Branches option' })
     }
-    const { error } = await supabase.from('branches').delete().eq('acronym', acronym)
-    if (error) throw error
+    await query('branches', 'delete', {
+      filters: [{ column: 'acronym', value: acronym }]
+    })
     invalidateCache()
     res.json({ message: 'Branch deleted' })
   } catch (err) {

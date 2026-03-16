@@ -1,6 +1,6 @@
 const express = require('express')
 const router = express.Router()
-const { supabase } = require('../config/database')
+const { query } = require('../config/database')
 const { authenticate, authorize } = require('../middleware/auth')
 
 // Get all maintenance data by type
@@ -13,13 +13,11 @@ router.get('/:type', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'Invalid maintenance data type' })
     }
 
-    const { data, error } = await supabase
-      .from('maintenance_data')
-      .select('value')
-      .eq('type', type)
-      .order('value', { ascending: true })
-
-    if (error) throw error
+    const data = await query('maintenance_data', 'select', {
+      select: 'value',
+      filters: [{ column: 'type', value: type }],
+      orderBy: { column: 'value', ascending: true }
+    })
 
     const values = (data || []).map(item => item.value)
     res.json(values)
@@ -39,13 +37,10 @@ router.get('/:type', authenticate, async (req, res) => {
 // Get all maintenance data (all types)
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('maintenance_data')
-      .select('type, value')
-      .order('type', { ascending: true })
-      .order('value', { ascending: true })
-
-    if (error) throw error
+    const data = await query('maintenance_data', 'select', {
+      select: 'type, value',
+      orderBy: { column: 'type', ascending: true }
+    })
 
     // Group by type
     const grouped = {}
@@ -96,29 +91,23 @@ router.post('/:type', authenticate, authorize('admin'), async (req, res) => {
     const trimmedValue = value.trim()
 
     // Check if already exists
-    const { data: existing, error: checkError } = await supabase
-      .from('maintenance_data')
-      .select('id')
-      .eq('type', type)
-      .eq('value', trimmedValue)
-      .maybeSingle()
-
-    if (checkError && checkError.code !== 'PGRST116') { // PGRST116 is "not found" which is OK
-      throw checkError
-    }
+    const existing = await query('maintenance_data', 'select', {
+      select: 'id',
+      filters: [
+        { column: 'type', value: type },
+        { column: 'value', value: trimmedValue }
+      ],
+      single: true
+    })
 
     if (existing) {
       return res.status(409).json({ message: `${type} "${trimmedValue}" already exists` })
     }
 
     // Insert new value
-    const { data, error } = await supabase
-      .from('maintenance_data')
-      .insert({ type, value: trimmedValue })
-      .select()
-      .single()
-
-    if (error) throw error
+    const data = await query('maintenance_data', 'insert', {
+      data: { type, value: trimmedValue }
+    })
 
     res.status(201).json({ message: `${type} "${trimmedValue}" added successfully`, data })
   } catch (err) {
@@ -154,13 +143,12 @@ router.delete('/:type/:value', authenticate, authorize('admin'), async (req, res
     // Decode the value (URL encoded)
     const decodedValue = decodeURIComponent(value)
 
-    const { error } = await supabase
-      .from('maintenance_data')
-      .delete()
-      .eq('type', type)
-      .eq('value', decodedValue)
-
-    if (error) throw error
+    await query('maintenance_data', 'delete', {
+      filters: [
+        { column: 'type', value: type },
+        { column: 'value', value: decodedValue }
+      ]
+    })
 
     res.json({ message: `${type} "${decodedValue}" deleted successfully` })
   } catch (err) {

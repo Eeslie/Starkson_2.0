@@ -2,7 +2,7 @@ const express = require('express')
 const router = express.Router()
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const { query, supabase } = require('../config/database')
+const { query } = require('../config/database')
 const { authenticate, authorize } = require('../middleware/auth')
 const { getValidAcronyms } = require('../lib/branches')
 
@@ -34,10 +34,9 @@ router.post('/register', authenticate, authorize('admin'), async (req, res) => {
 
     // Only one admin allowed
     if (role === 'admin') {
-      const { count } = await supabase
-        .from('users')
-        .select('*', { count: 'exact', head: true })
-        .eq('role', 'admin')
+      const { count } = await query('users', 'count', {
+        filters: [{ column: 'role', value: 'admin' }]
+      })
 
       if (count >= 1) {
         return res.status(400).json({ message: 'Only one admin is allowed. An admin already exists.' })
@@ -73,7 +72,7 @@ router.post('/register', authenticate, authorize('admin'), async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10)
 
-    // Create user (admin has no branch_acronyms). Use Supabase directly so array column is stored.
+    // Create user (admin has no branch_acronyms). In MySQL we store branch_acronyms as comma-separated string.
     const branchAcronymsForDb = role === 'admin' ? [] : normalizedBranches
     const insertPayload = {
       username: normalizedUsername,
@@ -81,40 +80,16 @@ router.post('/register', authenticate, authorize('admin'), async (req, res) => {
       fullname: typeof fullname === 'string' ? fullname.trim() : '',
       role,
       status: 'active',
-      branch_acronyms: branchAcronymsForDb
+      branch_acronyms: branchAcronymsForDb.join(',')
     }
 
-    const { data: result, error: insertError } = await supabase
-      .from('users')
-      .insert(insertPayload)
-      .select()
-      .single()
+    const result = await query('users', 'insert', { data: insertPayload })
 
-    if (insertError) {
-      console.error('Register insert error:', insertError.message, insertError.details)
-      return res.status(500).json({ message: insertError.message || 'Failed to create user' })
-    }
-
-    if (!result) {
+    if (!result || !result.id) {
       return res.status(500).json({ message: 'User created but could not read back record' })
     }
 
-    let storedBranchAcronyms = Array.isArray(result.branch_acronyms) ? result.branch_acronyms : []
-    if (branchAcronymsForDb.length > 0 && storedBranchAcronyms.length === 0) {
-      const { data: updated, error: updateErr } = await supabase
-        .from('users')
-        .update({ branch_acronyms: branchAcronymsForDb })
-        .eq('id', result.id)
-        .select('branch_acronyms')
-        .single()
-
-      if (!updateErr && updated) {
-        storedBranchAcronyms = Array.isArray(updated.branch_acronyms) ? updated.branch_acronyms : branchAcronymsForDb
-      }
-      if (storedBranchAcronyms.length === 0) {
-        console.warn('Register: branch_acronyms could not be stored. Run migration_branches.sql and check RLS.')
-      }
-    }
+    const storedBranchAcronyms = branchAcronymsForDb
 
     res.status(201).json({
       message: 'User created successfully',
@@ -135,13 +110,12 @@ router.post('/login', async (req, res) => {
     // Username normalization: UPPERCASE (accepts any casing input, stores/uses ALL CAPS)
     const normalizedUsername = typeof username === 'string' ? username.trim().toUpperCase() : ''
 
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('username', normalizedUsername)
-      .maybeSingle()
+    const user = await query('users', 'select', {
+      filters: [{ column: 'username', value: normalizedUsername }],
+      single: true
+    })
 
-    if (userError || !user) {
+    if (!user) {
       return res.status(401).json({ message: 'Invalid credentials' })
     }
 
@@ -178,15 +152,17 @@ router.post('/login', async (req, res) => {
 // Get current user (fresh from DB so branch_acronyms is always current)
 router.get('/me', authenticate, async (req, res) => {
   try {
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, username, fullname, role, branch_acronyms')
-      .eq('id', req.user.id)
-      .single()
+    const user = await query('users', 'select', {
+      select: 'id, username, fullname, role, branch_acronyms',
+      filters: [{ column: 'id', value: req.user.id }],
+      single: true
+    })
 
-    if (error || !user) return res.status(404).json({ message: 'User not found' })
+    if (!user) return res.status(404).json({ message: 'User not found' })
 
-    const branchAcronyms = Array.isArray(user.branch_acronyms) ? user.branch_acronyms : []
+    const branchAcronyms = typeof user.branch_acronyms === 'string' && user.branch_acronyms.trim()
+      ? user.branch_acronyms.split(',').map(a => a.trim()).filter(Boolean)
+      : []
     res.json({
       id: user.id,
       username: user.username, // will be ALL CAPS

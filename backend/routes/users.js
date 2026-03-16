@@ -1,19 +1,20 @@
 const express = require('express')
 const router = express.Router()
-const { query, supabase } = require('../config/database')
+const { query } = require('../config/database')
 const { authenticate, authorize } = require('../middleware/auth')
 const { getValidAcronyms } = require('../lib/branches')
 
 // Get security officers only (for convert-to-incident assignment; it_support and admin)
 router.get('/security-officers', authenticate, authorize('it_support', 'security_officer', 'admin'), async (req, res) => {
   try {
-    const { data: users, error } = await supabase
-      .from('users')
-      .select('id, fullname, username')
-      .eq('role', 'security_officer')
-      .eq('status', 'active')
-      .order('fullname', { ascending: true })
-    if (error) throw error
+    const users = await query('users', 'select', {
+      select: 'id, fullname, username',
+      filters: [
+        { column: 'role', value: 'security_officer' },
+        { column: 'status', value: 'active' }
+      ],
+      orderBy: { column: 'fullname', ascending: true }
+    })
     res.json(users || [])
   } catch (error) {
     console.error('Get security officers error:', error)
@@ -24,13 +25,14 @@ router.get('/security-officers', authenticate, authorize('it_support', 'security
 // NEW ROUTE: Get admins only (for convert-to-incident assignment)
 router.get('/admins', authenticate, authorize('it_support', 'security_officer', 'admin'), async (req, res) => {
   try {
-    const { data: users, error } = await supabase
-      .from('users')
-      .select('id, fullname, username')
-      .eq('role', 'admin')
-      .eq('status', 'active')
-      .order('fullname', { ascending: true })
-    if (error) throw error
+    const users = await query('users', 'select', {
+      select: 'id, fullname, username',
+      filters: [
+        { column: 'role', value: 'admin' },
+        { column: 'status', value: 'active' }
+      ],
+      orderBy: { column: 'fullname', ascending: true }
+    })
     res.json(users || [])
   } catch (error) {
     console.error('Get admins error:', error)
@@ -42,31 +44,34 @@ router.get('/admins', authenticate, authorize('it_support', 'security_officer', 
 router.get('/', authenticate, authorize('admin'), async (req, res) => {
   try {
     const { role, branch_acronym } = req.query
-    let query = supabase
-      .from('users')
-      .select('id, username, fullname, role, status, branch_acronyms, created_at, updated_at')
-      .order('created_at', { ascending: false })
-
+    const filters = []
     if (role && typeof role === 'string' && ['user', 'it_support', 'security_officer', 'admin'].includes(role)) {
-      query = query.eq('role', role)
+      filters.push({ column: 'role', value: role })
     }
 
-    const { data: rawUsers, error } = await query
-    if (error) throw error
+    const rawUsers = await query('users', 'select', {
+      select: 'id, username, fullname, role, status, branch_acronyms, created_at, updated_at',
+      filters: filters.length ? filters : undefined,
+      orderBy: { column: 'created_at', ascending: false }
+    })
 
     // Filter by branch in memory: show users whose branch_acronyms includes branch_acronym or 'ALL'
     let users = rawUsers || []
     if (branch_acronym && typeof branch_acronym === 'string' && branch_acronym.trim()) {
       const branch = branch_acronym.trim()
       users = users.filter((u) => {
-        const arr = Array.isArray(u.branch_acronyms) ? u.branch_acronyms : []
+        const arr = typeof u.branch_acronyms === 'string' && u.branch_acronyms.trim()
+          ? u.branch_acronyms.split(',').map(a => a.trim())
+          : []
         return arr.includes(branch) || arr.includes('ALL')
       })
     }
 
     res.json(users.map(u => ({
       ...u,
-      branchAcronyms: Array.isArray(u.branch_acronyms) ? u.branch_acronyms : [],
+      branchAcronyms: typeof u.branch_acronyms === 'string' && u.branch_acronyms.trim()
+        ? u.branch_acronyms.split(',').map(a => a.trim())
+        : [],
       createdAt: u.created_at,
       updatedAt: u.updated_at
     })))
@@ -79,19 +84,21 @@ router.get('/', authenticate, authorize('admin'), async (req, res) => {
 // Get single user (admin only)
 router.get('/:id', authenticate, authorize('admin'), async (req, res) => {
   try {
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, username, fullname, role, status, branch_acronyms, created_at, updated_at')
-      .eq('id', req.params.id)
-      .single()
+    const user = await query('users', 'select', {
+      select: 'id, username, fullname, role, status, branch_acronyms, created_at, updated_at',
+      filters: [{ column: 'id', value: req.params.id }],
+      single: true
+    })
 
-    if (error || !user) {
+    if (!user) {
       return res.status(404).json({ message: 'User not found' })
     }
 
     res.json({
       ...user,
-      branchAcronyms: Array.isArray(user.branch_acronyms) ? user.branch_acronyms : [],
+      branchAcronyms: typeof user.branch_acronyms === 'string' && user.branch_acronyms.trim()
+        ? user.branch_acronyms.split(',').map(a => a.trim())
+        : [],
       createdAt: user.created_at,
       updatedAt: user.updated_at
     })
@@ -110,22 +117,20 @@ router.put('/:id/role', authenticate, authorize('admin'), async (req, res) => {
       return res.status(400).json({ message: 'Invalid role' })
     }
 
-    const { data: existing } = await supabase
-      .from('users')
-      .select('id, role')
-      .eq('id', req.params.id)
-      .single()
+    const existing = await query('users', 'select', {
+      select: 'id, role',
+      filters: [{ column: 'id', value: req.params.id }],
+      single: true
+    })
 
     if (!existing) {
       return res.status(404).json({ message: 'User not found' })
     }
 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ role, updated_at: new Date().toISOString() })
-      .eq('id', req.params.id)
-
-    if (updateError) throw updateError
+    await query('users', 'update', {
+      data: { role, updated_at: new Date().toISOString() },
+      filters: [{ column: 'id', value: req.params.id }]
+    })
 
     await query('audit_logs', 'insert', {
       data: {
@@ -153,11 +158,11 @@ router.put('/:id/branches', authenticate, authorize('admin'), async (req, res) =
       ? branchAcronyms.filter(a => typeof a === 'string' && validAcronyms.has(a.trim()))
       : []
 
-    const { data: existing } = await supabase
-      .from('users')
-      .select('id, role')
-      .eq('id', req.params.id)
-      .single()
+    const existing = await query('users', 'select', {
+      select: 'id, role',
+      filters: [{ column: 'id', value: req.params.id }],
+      single: true
+    })
 
     if (!existing) {
       return res.status(404).json({ message: 'User not found' })
@@ -167,12 +172,10 @@ router.put('/:id/branches', authenticate, authorize('admin'), async (req, res) =
       return res.status(400).json({ message: 'Admin users do not have branch assignments' })
     }
 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ branch_acronyms: normalized, updated_at: new Date().toISOString() })
-      .eq('id', req.params.id)
-
-    if (updateError) throw updateError
+    await query('users', 'update', {
+      data: { branch_acronyms: normalized.join(','), updated_at: new Date().toISOString() },
+      filters: [{ column: 'id', value: req.params.id }]
+    })
 
     res.json({ message: 'User branches updated' })
   } catch (error) {
@@ -190,12 +193,10 @@ router.put('/:id/status', authenticate, authorize('admin'), async (req, res) => 
       return res.status(400).json({ message: 'Invalid status' })
     }
 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq('id', req.params.id)
-
-    if (updateError) throw updateError
+    await query('users', 'update', {
+      data: { status, updated_at: new Date().toISOString() },
+      filters: [{ column: 'id', value: req.params.id }]
+    })
 
     await query('audit_logs', 'insert', {
       data: {
@@ -223,25 +224,19 @@ router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
       return res.status(400).json({ message: 'You cannot delete your own account' })
     }
 
-    const { data: target, error: fetchError } = await supabase
-      .from('users')
-      .select('id, username, fullname, role')
-      .eq('id', targetId)
-      .single()
+    const target = await query('users', 'select', {
+      select: 'id, username, fullname, role',
+      filters: [{ column: 'id', value: targetId }],
+      single: true
+    })
 
-    if (fetchError || !target) {
+    if (!target) {
       return res.status(404).json({ message: 'User not found' })
     }
 
-    const { error: deleteError } = await supabase
-      .from('users')
-      .delete()
-      .eq('id', targetId)
-
-    if (deleteError) {
-      console.error('Delete user error:', deleteError)
-      return res.status(500).json({ message: deleteError.message || 'Failed to delete user' })
-    }
+    await query('users', 'delete', {
+      filters: [{ column: 'id', value: targetId }]
+    })
 
     await query('audit_logs', 'insert', {
       data: {

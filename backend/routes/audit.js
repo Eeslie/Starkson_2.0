@@ -1,6 +1,6 @@
 const express = require('express')
 const router = express.Router()
-const { supabase } = require('../config/database')
+const { runQuery } = require('../config/database')
 const { authenticate, authorize } = require('../middleware/auth')
 
 // audit_logs.created_at: set ONLY by the database (DEFAULT NOW() + trigger). Never send created_at on insert. Real-time.
@@ -23,36 +23,47 @@ router.get('/export', authenticate, authorize('admin'), async (req, res) => {
     const { startDate, endDate, format = 'csv', resourceType, action, search } = req.query
 
     const logs = []
-    let offset = 0
-    let hasMore = true
     const searchTerm = search && String(search).trim() ? String(search).trim() : null
 
-    while (hasMore) {
-      let q = supabase
-        .from('audit_logs')
-        .select(`
-          id, action, resource_type, resource_id, details, ip_address, created_at, user_id,
-          user:users!audit_logs_user_id_fkey(fullname, username)
-        `)
-        .order('created_at', { ascending: false })
-        .range(offset, offset + EXPORT_PAGE_SIZE - 1)
-
-      if (resourceType) q = q.eq('resource_type', resourceType)
-      if (action) q = q.eq('action', action)
-      const startISO = startOfDayPHT(startDate)
-      const endISO = endOfDayPHT(endDate)
-      if (startISO) q = q.gte('created_at', startISO)
-      if (endISO) q = q.lte('created_at', endISO)
-
-      const { data: page, error } = await q
-
-      if (error) throw error
-      if (!page || page.length === 0) break
-      const toAdd = searchTerm ? page.filter((l) => auditLogMatchesSearch(l, searchTerm)) : page
-      logs.push(...toAdd)
-      hasMore = page.length === EXPORT_PAGE_SIZE
-      offset += EXPORT_PAGE_SIZE
+    // Build base SQL with join to users
+    const conditions = []
+    const params = []
+    if (resourceType) {
+      conditions.push('al.resource_type = ?')
+      params.push(resourceType)
     }
+    if (action) {
+      conditions.push('al.action = ?')
+      params.push(action)
+    }
+    const startISO = startOfDayPHT(startDate)
+    const endISO = endOfDayPHT(endDate)
+    if (startISO) {
+      conditions.push('al.created_at >= ?')
+      params.push(startISO)
+    }
+    if (endISO) {
+      conditions.push('al.created_at <= ?')
+      params.push(endISO)
+    }
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const sql = `
+      SELECT 
+        al.id, al.action, al.resource_type, al.resource_id, al.details, al.ip_address,
+        al.created_at, al.user_id,
+        u.fullname AS user_fullname,
+        u.username AS user_username
+      FROM audit_logs al
+      LEFT JOIN users u ON u.id = al.user_id
+      ${whereClause}
+      ORDER BY al.created_at DESC
+      LIMIT ?
+    `
+    const exportRows = await runQuery(sql, [...params, EXPORT_PAGE_SIZE])
+    const page = exportRows || []
+    const toAdd = searchTerm ? page.filter((l) => auditLogMatchesSearch(l, searchTerm)) : page
+    logs.push(...toAdd)
 
     if (format === 'json') {
       res.setHeader('Content-Disposition', 'attachment; filename=audit-report.json')
@@ -60,21 +71,21 @@ router.get('/export', authenticate, authorize('admin'), async (req, res) => {
       return res.json(logs || [])
     }
 
-    const rows = (logs || []).map(l => ({
+    const csvRows = (logs || []).map(l => ({
       id: l.id,
       createdAt: l.created_at,
       action: l.action,
       resourceType: l.resource_type || '',
       resourceId: l.resource_id || '',
-      userName: l.user?.fullname || '',
-      userUsername: l.user?.username || '',
+      userName: l.user_fullname || '',
+      userUsername: l.user_username || '',
       details: typeof l.details === 'object' ? JSON.stringify(l.details) : (l.details || ''),
       ipAddress: l.ip_address || ''
     }))
 
     const headers = ['id', 'createdAt', 'action', 'resourceType', 'resourceId', 'userName', 'userUsername', 'details', 'ipAddress']
     const csv = [headers.join(',')].concat(
-      rows.map(r => headers.map(h => `"${String(r[h] || '').replace(/"/g, '""')}"`).join(','))
+      csvRows.map(r => headers.map(h => `"${String(r[h] || '').replace(/"/g, '""')}"`).join(','))
     ).join('\n')
 
     res.setHeader('Content-Disposition', 'attachment; filename=audit-report.csv')
@@ -108,35 +119,72 @@ router.get('/', authenticate, authorize('admin'), async (req, res) => {
 
     const startISO = startOfDayPHT(startDate)
     const endISO = endOfDayPHT(endDate)
-    let q = supabase
-      .from('audit_logs')
-      .select(`
-        *,
-        user:users!audit_logs_user_id_fkey(id, fullname, username)
-      `, search ? undefined : { count: 'exact' })
-      .order('created_at', { ascending: false })
-    if (resourceType) q = q.eq('resource_type', resourceType)
-    if (resourceId) q = q.eq('resource_id', resourceId)
-    if (action) q = q.eq('action', action)
-    if (startISO) q = q.gte('created_at', startISO)
-    if (endISO) q = q.lte('created_at', endISO)
+    const conditions = []
+    const params = []
+    if (resourceType) {
+      conditions.push('al.resource_type = ?')
+      params.push(resourceType)
+    }
+    if (resourceId) {
+      conditions.push('al.resource_id = ?')
+      params.push(resourceId)
+    }
+    if (action) {
+      conditions.push('al.action = ?')
+      params.push(action)
+    }
+    if (startISO) {
+      conditions.push('al.created_at >= ?')
+      params.push(startISO)
+    }
+    if (endISO) {
+      conditions.push('al.created_at <= ?')
+      params.push(endISO)
+    }
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const baseSql = `
+      FROM audit_logs al
+      LEFT JOIN users u ON u.id = al.user_id
+      ${whereClause}
+    `
 
     let logs
     let total
 
     if (search && String(search).trim()) {
-      // When search is provided, fetch more rows then filter in memory (resource_id + details text)
       const fetchLimit = 5000
-      q = q.range(0, fetchLimit - 1)
-      const { data: rawLogs, error } = await q
-      if (error) throw error
+      const sql = `
+        SELECT 
+          al.id, al.action, al.resource_type, al.resource_id, al.details, al.ip_address,
+          al.user_agent, al.created_at, al.user_id,
+          u.fullname AS user_fullname,
+          u.username AS user_username
+        ${baseSql}
+        ORDER BY al.created_at DESC
+        LIMIT ?
+      `
+      const rawLogs = await runQuery(sql, [...params, fetchLimit])
       const filtered = (rawLogs || []).filter((l) => auditLogMatchesSearch(l, search))
       total = filtered.length
       logs = filtered.slice(offsetNum, offsetNum + limitNum)
     } else {
-      q = q.range(offsetNum, offsetNum + limitNum - 1)
-      const { data: rawLogs, error, count } = await q
-      if (error) throw error
+      const sql = `
+        SELECT 
+          al.id, al.action, al.resource_type, al.resource_id, al.details, al.ip_address,
+          al.user_agent, al.created_at, al.user_id,
+          u.fullname AS user_fullname,
+          u.username AS user_username
+        ${baseSql}
+        ORDER BY al.created_at DESC
+        LIMIT ? OFFSET ?
+      `
+      const rawLogs = await runQuery(sql, [...params, limitNum, offsetNum])
+
+      const countSql = `SELECT COUNT(*) as count ${baseSql}`
+      const countRows = await runQuery(countSql, params)
+      const count = countRows[0]?.count || 0
+
       logs = rawLogs || []
       total = count ?? logs.length
     }
@@ -150,8 +198,8 @@ router.get('/', authenticate, authorize('admin'), async (req, res) => {
       ipAddress: l.ip_address,
       userAgent: l.user_agent,
       createdAt: l.created_at,
-      userName: l.user?.fullname,
-      userUsername: l.user?.username,
+      userName: l.user_fullname,
+      userUsername: l.user_username,
       userId: l.user_id
     }))
 
@@ -167,26 +215,27 @@ router.get('/resource/:resourceType/:resourceId', authenticate, authorize('admin
   try {
     const { resourceType, resourceId } = req.params
 
-    const { data: logs, error } = await supabase
-      .from('audit_logs')
-      .select(`
-        *,
-        user:users!audit_logs_user_id_fkey(id, fullname, username)
-      `)
-      .eq('resource_type', resourceType)
-      .eq('resource_id', resourceId)
-      .order('created_at', { ascending: false })
-      .limit(100)
-
-    if (error) throw error
+    const sql = `
+      SELECT 
+        al.id, al.action, al.details, al.created_at,
+        u.fullname AS user_fullname,
+        u.username AS user_username
+      FROM audit_logs al
+      LEFT JOIN users u ON u.id = al.user_id
+      WHERE al.resource_type = ?
+        AND al.resource_id = ?
+      ORDER BY al.created_at DESC
+      LIMIT 100
+    `
+    const logs = await runQuery(sql, [resourceType, resourceId])
 
     res.json((logs || []).map(l => ({
       id: l.id,
       action: l.action,
       details: l.details,
       createdAt: l.created_at,
-      userName: l.user?.fullname,
-      userUsername: l.user?.username
+      userName: l.user_fullname,
+      userUsername: l.user_username
     })))
   } catch (error) {
     console.error('Get resource audit error:', error)

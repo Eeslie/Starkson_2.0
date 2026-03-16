@@ -1,6 +1,6 @@
 const express = require('express')
 const router = express.Router()
-const { query, supabase } = require('../config/database')
+const { query } = require('../config/database')
 const { authenticate, authorize } = require('../middleware/auth')
 
 const PRIORITIES = ['low', 'medium', 'high', 'urgent']
@@ -8,12 +8,10 @@ const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 // Get all SLA rules (admin only; it_support can read for compliance)
 router.get('/', authenticate, authorize('admin', 'it_support'), async (req, res) => {
   try {
-    const { data: rules, error } = await supabase
-      .from('sla_config')
-      .select('*')
-      .order('response_time_minutes', { ascending: true })
-
-    if (error) throw error
+    const rules = await query('sla_config', 'select', {
+      select: '*',
+      orderBy: { column: 'response_time_minutes', ascending: true }
+    })
 
     const order = { urgent: 0, high: 1, medium: 2, low: 3 }
     const sorted = (rules || []).sort((a, b) => (order[a.priority] ?? 4) - (order[b.priority] ?? 4))
@@ -47,28 +45,24 @@ router.post('/', authenticate, authorize('admin'), async (req, res) => {
       return res.status(400).json({ message: 'Response time (minutes) and resolution time (hours) must be non-negative numbers' })
     }
 
-    const { data: existing } = await supabase
-      .from('sla_config')
-      .select('id')
-      .eq('priority', priority)
-      .maybeSingle()
+    const existing = await query('sla_config', 'select', {
+      select: 'id',
+      filters: [{ column: 'priority', value: priority }],
+      single: true
+    })
 
     if (existing) {
       return res.status(400).json({ message: `SLA rule for priority "${priority}" already exists. Use PUT to update.` })
     }
 
-    const { data: created, error: insertError } = await supabase
-      .from('sla_config')
-      .insert({
+    const created = await query('sla_config', 'insert', {
+      data: {
         priority,
         response_time_minutes,
         resolution_time_hours,
         is_active: !!isActive
-      })
-      .select()
-      .single()
-
-    if (insertError) throw insertError
+      }
+    })
 
     await query('audit_logs', 'insert', {
       data: {
@@ -102,16 +96,20 @@ router.put('/:idOrPriority', authenticate, authorize('admin'), async (req, res) 
     let row
 
     if (isUuid) {
-      const { data, error } = await supabase.from('sla_config').select('*').eq('id', idOrPriority).single()
-      if (error || !data) return res.status(404).json({ message: 'SLA rule not found' })
-      row = data
+      row = await query('sla_config', 'select', {
+        filters: [{ column: 'id', value: idOrPriority }],
+        single: true
+      })
+      if (!row) return res.status(404).json({ message: 'SLA rule not found' })
     } else {
       if (!PRIORITIES.includes(idOrPriority)) {
         return res.status(400).json({ message: 'Invalid priority' })
       }
-      const { data, error } = await supabase.from('sla_config').select('*').eq('priority', idOrPriority).single()
-      if (error || !data) return res.status(404).json({ message: 'SLA rule not found' })
-      row = data
+      row = await query('sla_config', 'select', {
+        filters: [{ column: 'priority', value: idOrPriority }],
+        single: true
+      })
+      if (!row) return res.status(404).json({ message: 'SLA rule not found' })
     }
 
     const updateData = { updated_at: new Date().toISOString() }
@@ -127,14 +125,15 @@ router.put('/:idOrPriority', authenticate, authorize('admin'), async (req, res) 
     }
     if (isActive !== undefined) updateData.is_active = !!isActive
 
-    const { data: updated, error: updateError } = await supabase
-      .from('sla_config')
-      .update(updateData)
-      .eq('id', row.id)
-      .select()
-      .single()
+    await query('sla_config', 'update', {
+      data: updateData,
+      filters: [{ column: 'id', value: row.id }]
+    })
 
-    if (updateError) throw updateError
+    const updated = await query('sla_config', 'select', {
+      filters: [{ column: 'id', value: row.id }],
+      single: true
+    })
 
     await query('audit_logs', 'insert', {
       data: {
@@ -171,13 +170,18 @@ router.delete('/:idOrPriority', authenticate, authorize('admin'), async (req, re
       if (!PRIORITIES.includes(idOrPriority)) {
         return res.status(400).json({ message: 'Invalid priority' })
       }
-      const { data } = await supabase.from('sla_config').select('id').eq('priority', idOrPriority).single()
-      if (!data) return res.status(404).json({ message: 'SLA rule not found' })
-      idToDelete = data.id
+      const row = await query('sla_config', 'select', {
+        select: 'id',
+        filters: [{ column: 'priority', value: idOrPriority }],
+        single: true
+      })
+      if (!row) return res.status(404).json({ message: 'SLA rule not found' })
+      idToDelete = row.id
     }
 
-    const { error: deleteError } = await supabase.from('sla_config').delete().eq('id', idToDelete)
-    if (deleteError) throw deleteError
+    await query('sla_config', 'delete', {
+      filters: [{ column: 'id', value: idToDelete }]
+    })
 
     await query('audit_logs', 'insert', {
       data: {
@@ -199,11 +203,9 @@ router.delete('/:idOrPriority', authenticate, authorize('admin'), async (req, re
 // SLA compliance / breach indicators (it_support, admin)
 router.get('/compliance', authenticate, authorize('it_support', 'admin'), async (req, res) => {
   try {
-    const { data: tickets, error: ticketsError } = await supabase
-      .from('tickets')
-      .select('id, priority, status, created_at, resolved_at, closed_at, sla_due')
-
-    if (ticketsError) throw ticketsError
+    const tickets = await query('tickets', 'select', {
+      select: 'id, priority, status, created_at, resolved_at, closed_at, sla_due'
+    })
 
     const now = new Date()
     const byPriority = { low: { total: 0, breached: 0 }, medium: { total: 0, breached: 0 }, high: { total: 0, breached: 0 }, urgent: { total: 0, breached: 0 } }

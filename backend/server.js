@@ -1,10 +1,9 @@
 const express = require('express')
 const cors = require('cors')
 const dotenv = require('dotenv')
-const { supabase } = require('./config/database')
 
-// Load environment variables
-dotenv.config()
+// Load environment variables from .env.local
+dotenv.config({ path: '.env.local' })
 
 const app = express()
 const PORT = process.env.PORT || 5000
@@ -130,7 +129,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`)
   console.log(`Server accessible at http://10.0.0.66:${PORT}`)
-  console.log('Supabase client initialized')
   console.log('CORS enabled for:', corsOptions.origin)
 })
 

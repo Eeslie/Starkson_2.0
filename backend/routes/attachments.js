@@ -5,7 +5,7 @@ const path = require('path')
 const fs = require('fs')
 const jwt = require('jsonwebtoken')
 const cloudinary = require('cloudinary').v2
-const { query, supabase } = require('../config/database')
+const { query, runQuery } = require('../config/database')
 const { authenticate } = require('../middleware/auth')
 
 // Configure Cloudinary
@@ -15,7 +15,6 @@ const cloudinaryConfig = {
   api_secret: process.env.CLOUDINARY_API_SECRET
 }
 
-// Validate Cloudinary configuration
 if (!cloudinaryConfig.cloud_name || !cloudinaryConfig.api_key || !cloudinaryConfig.api_secret) {
   console.error('⚠️  Cloudinary configuration missing! Please set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in your .env file')
 } else {
@@ -23,26 +22,20 @@ if (!cloudinaryConfig.cloud_name || !cloudinaryConfig.api_key || !cloudinaryConf
   console.log('✅ Cloudinary configured successfully')
 }
 
-// Configure multer for in-memory storage (for Cloudinary)
+// Multer in-memory storage
 const storage = multer.memoryStorage()
-
 const upload = multer({
-  storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|log|csv/
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase())
     const mimetype = allowedTypes.test(file.mimetype)
-    
-    if (mimetype && extname) {
-      return cb(null, true)
-    } else {
-      cb(new Error('Invalid file type'))
-    }
+    if (mimetype && extname) cb(null, true)
+    else cb(new Error('Invalid file type'))
   }
 })
 
-// Error handler for multer
 const handleMulterError = (err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
@@ -56,7 +49,7 @@ const handleMulterError = (err, req, res, next) => {
   next()
 }
 
-// Test route to verify attachments router is working
+// Test route
 router.get('/test', (req, res) => {
   res.json({ message: 'Attachments router is working', timestamp: new Date().toISOString() })
 })
@@ -65,149 +58,108 @@ router.get('/test', (req, res) => {
 router.get('/recent', authenticate, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20
-    
-    let query = supabase
-      .from('attachments')
-      .select(`
-        *,
-        uploaded_by_user:users!attachments_uploaded_by_fkey(id, fullname, username)
-      `)
-      .order('created_at', { ascending: false })
-      .limit(limit)
+    const role = req.user.role
+    const userId = req.user.id
 
-    // Different permission logic based on role
-    if (req.user.role === 'user') {
-      // Regular users: only see attachments from their own tickets
-      const { data: userTickets } = await supabase
-        .from('tickets')
-        .select('id')
-        .eq('created_by', req.user.id)
+    // Base attachments query (joined with users for uploader name)
+    const baseSql = `
+      SELECT
+        a.*,
+        u.fullname AS uploaded_by_fullname,
+        u.username AS uploaded_by_username
+      FROM attachments a
+      LEFT JOIN users u ON u.id = a.uploaded_by
+    `
+    let where = ''
+    const params = []
 
-      const ticketIds = userTickets?.map(t => t.id) || []
-      
+    if (role === 'user') {
+      // Only attachments from tickets they created or incidents from those tickets
+      const userTickets = await query('tickets', 'select', {
+        select: 'id',
+        filters: [{ column: 'created_by', value: userId }]
+      }) || []
+      const ticketIds = userTickets.map(t => t.id)
       if (ticketIds.length === 0) {
         return res.json({ attachments: [] })
       }
-
-      // Filter attachments to only show from user's tickets
-      query = query
-        .or(`record_type.eq.incident,and(record_type.eq.ticket,record_id.in.(${ticketIds.join(',')}))`)
-    
-    } else if (req.user.role === 'it_support') {
-      // IT Support: see attachments from tickets they're assigned to AND from their own tickets
-      // This ensures they see attachments posted by users on tickets assigned to them
-      
-      // Get tickets assigned to this IT Support staff
-      const { data: assignedTickets } = await supabase
-        .from('tickets')
-        .select('id')
-        .eq('assigned_to', req.user.id)
-
-      // Also get tickets they created (if any)
-      const { data: createdTickets } = await supabase
-        .from('tickets')
-        .select('id')
-        .eq('created_by', req.user.id)
-
-      const assignedIds = assignedTickets?.map(t => t.id) || []
-      const createdIds = createdTickets?.map(t => t.id) || []
-      
-      // Combine and deduplicate ticket IDs
-      const allTicketIds = [...new Set([...assignedIds, ...createdIds])]
-      
-      if (allTicketIds.length === 0) {
+      where = 'WHERE (a.record_type = "ticket" AND a.record_id IN (?))'
+      params.push(ticketIds)
+    } else if (role === 'it_support') {
+      // Tickets assigned to them or created by them
+      const assigned = await query('tickets', 'select', {
+        select: 'id',
+        filters: [{ column: 'assigned_to', value: userId }]
+      }) || []
+      const created = await query('tickets', 'select', {
+        select: 'id',
+        filters: [{ column: 'created_by', value: userId }]
+      }) || []
+      const allIds = [...new Set([...assigned.map(t => t.id), ...created.map(t => t.id)])]
+      if (allIds.length === 0) {
         return res.json({ attachments: [] })
       }
-
-      // Show attachments from all relevant tickets
-      // This includes attachments uploaded by users on tickets assigned to this IT Support
-      query = query
-        .or(`record_type.eq.incident,and(record_type.eq.ticket,record_id.in.(${allTicketIds.join(',')}))`)
-      
-      console.log(`🔧 IT Support viewing attachments from ${allTicketIds.length} tickets`);
-    
-    } else if (req.user.role === 'security_officer') {
-      // Security Officer: see attachments from incidents they're assigned to
-      const { data: assignedIncidents } = await supabase
-        .from('incidents')
-        .select('id')
-        .eq('assigned_to', req.user.id)
-
-      const incidentIds = assignedIncidents?.map(i => i.id) || []
-      
-      // Also get incidents they created
-      const { data: createdIncidents } = await supabase
-        .from('incidents')
-        .select('id')
-        .eq('created_by', req.user.id)
-
-      const createdIncidentIds = createdIncidents?.map(i => i.id) || []
-      const allIncidentIds = [...new Set([...incidentIds, ...createdIncidentIds])]
-      
-      if (allIncidentIds.length > 0) {
-        query = query
-          .or(`record_type.eq.ticket,and(record_type.eq.incident,record_id.in.(${allIncidentIds.join(',')}))`)
-      } else {
-        // If no incidents, only show ticket attachments from their own tickets
-        const { data: userTickets } = await supabase
-          .from('tickets')
-          .select('id')
-          .eq('created_by', req.user.id)
-
-        const ticketIds = userTickets?.map(t => t.id) || []
-        
-        if (ticketIds.length > 0) {
-          query = query
-            .or(`record_type.eq.incident,and(record_type.eq.ticket,record_id.in.(${ticketIds.join(',')}))`)
-        } else {
-          return res.json({ attachments: [] })
-        }
+      where = 'WHERE (a.record_type = "ticket" AND a.record_id IN (?))'
+      params.push(allIds)
+    } else if (role === 'security_officer') {
+      // Incidents assigned to them or created by them
+      const assignedInc = await query('incidents', 'select', {
+        select: 'id',
+        filters: [{ column: 'assigned_to', value: userId }]
+      }) || []
+      const createdInc = await query('incidents', 'select', {
+        select: 'id',
+        filters: [{ column: 'created_by', value: userId }]
+      }) || []
+      const incIds = [...new Set([...assignedInc.map(i => i.id), ...createdInc.map(i => i.id)])]
+      if (incIds.length === 0) {
+        return res.json({ attachments: [] })
       }
-    
-    } else if (req.user.role === 'admin') {
-      // Admin: see all attachments (no filtering needed)
-      console.log(`👑 Admin viewing all attachments`);
+      where = 'WHERE (a.record_type = "incident" AND a.record_id IN (?))'
+      params.push(incIds)
+    } else if (role === 'admin') {
+      // Admin sees all
+      where = ''
     }
 
-    const { data: attachments, error } = await query
+    const sql = `
+      ${baseSql}
+      ${where}
+      ORDER BY a.created_at DESC
+      LIMIT ?
+    `
+    params.push(limit)
 
-    if (error) {
-      console.error('Get recent attachments error:', error)
-      return res.status(500).json({ message: 'Server error' })
-    }
+    const attachments = await runQuery(sql, params)
 
-    // Enhance attachments with ticket/incident info
-    const enhancedAttachments = await Promise.all(attachments.map(async (att) => {
+    // Enhance with ticket/incident display
+    const enhanced = await Promise.all((attachments || []).map(async (att) => {
       let referenceNumber = null
       let title = null
-      
+
       if (att.record_type === 'ticket') {
-        const { data: ticket } = await supabase
-          .from('tickets')
-          .select('ticket_number, title')
-          .eq('id', att.record_id)
-          .single()
-        
+        const ticket = await query('tickets', 'select', {
+          select: 'ticket_number, title',
+          filters: [{ column: 'id', value: att.record_id }],
+          single: true
+        })
         if (ticket) {
           referenceNumber = ticket.ticket_number
           title = ticket.title
         }
       } else if (att.record_type === 'incident') {
-        const { data: incident } = await supabase
-          .from('incidents')
-          .select('incident_number, title')
-          .eq('id', att.record_id)
-          .single()
-        
+        const incident = await query('incidents', 'select', {
+          select: 'incident_number, title',
+          filters: [{ column: 'id', value: att.record_id }],
+          single: true
+        })
         if (incident) {
           referenceNumber = incident.incident_number
           title = incident.title
         }
       }
 
-      // Get the best available name field
-      const userData = att.uploaded_by_user || {}
-      const uploaderName = userData.fullname || userData.username || 'Unknown'
+      const uploaderName = att.uploaded_by_fullname || att.uploaded_by_username || 'Unknown'
 
       return {
         id: att.id,
@@ -223,198 +175,146 @@ router.get('/recent', authenticate, async (req, res) => {
         created_at: att.created_at,
         reference_number: referenceNumber,
         title: title,
-        parent_display: referenceNumber ? `${referenceNumber} - ${title || 'Untitled'}` : `${att.record_type} #${att.record_id.substring(0, 8)}`
+        parent_display: referenceNumber
+          ? `${referenceNumber} - ${title || 'Untitled'}`
+          : `${att.record_type} #${String(att.record_id).slice(0, 8)}`
       }
     }))
 
-    res.json({ attachments: enhancedAttachments })
+    res.json({ attachments: enhanced })
   } catch (error) {
     console.error('Get recent attachments error:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })
 
-// Upload attachment - MUST be before GET /:recordType/:recordId to avoid route conflicts
-router.post('/:recordType/:recordId', authenticate, (req, res, next) => {
-  console.log('🔐 Authentication passed, proceeding to file upload...')
-  console.log('📋 Route params:', req.params)
-  next()
-}, upload.single('file'), (err, req, res, next) => {
-  // Multer error handler - must be 4 parameters
-  if (err instanceof multer.MulterError) {
-    console.error('❌ Multer error:', err)
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ message: 'File too large. Maximum size is 10MB.' })
-    }
-    return res.status(400).json({ message: 'File upload error', error: err.message })
-  }
-  if (err) {
-    console.error('❌ Upload error:', err)
-    return res.status(400).json({ message: err.message || 'File upload error' })
-  }
-  next()
-}, async (req, res) => {
-  try {
-    console.log('📥 Upload request received:', {
-      recordType: req.params.recordType,
-      recordId: req.params.recordId,
-      hasFile: !!req.file,
-      fileName: req.file?.originalname,
-      fileSize: req.file?.size,
-      user: req.user?.id
-    })
-    
-    const { recordType, recordId } = req.params
-    const file = req.file
+// Upload attachment
+router.post(
+  '/:recordType/:recordId',
+  authenticate,
+  (req, res, next) => {
+    console.log('🔐 Authentication passed, proceeding to file upload...')
+    console.log('📋 Route params:', req.params)
+    next()
+  },
+  upload.single('file'),
+  handleMulterError,
+  async (req, res) => {
+    try {
+      const { recordType, recordId } = req.params
+      const file = req.file
 
-    if (!file) {
-      return res.status(400).json({ message: 'No file uploaded' })
-    }
+      if (!file) return res.status(400).json({ message: 'No file uploaded' })
+      if (!['ticket', 'incident'].includes(recordType)) {
+        return res.status(400).json({ message: 'Invalid record type' })
+      }
 
-    if (!['ticket', 'incident'].includes(recordType)) {
-      return res.status(400).json({ message: 'Invalid record type' })
-    }
+      if (recordType === 'ticket') {
+        const ticket = await query('tickets', 'select', {
+          filters: [{ column: 'id', value: recordId }],
+          single: true
+        })
+        if (!ticket) {
+          return res.status(404).json({ message: 'Ticket not found' })
+        }
+        if (req.user.role === 'user' && ticket.created_by !== req.user.id) {
+          return res.status(403).json({ message: 'Forbidden' })
+        }
+      } else if (recordType === 'incident') {
+        if (!['security_officer', 'admin'].includes(req.user.role)) {
+          return res.status(403).json({ message: 'Forbidden' })
+        }
+        const incident = await query('incidents', 'select', {
+          filters: [{ column: 'id', value: recordId }],
+          single: true
+        })
+        if (!incident) {
+          return res.status(404).json({ message: 'Incident not found' })
+        }
+      }
 
-    // Verify record exists and user has access
-    if (recordType === 'ticket') {
-      console.log(`🔍 Checking ticket existence: ${recordId} (type: ${typeof recordId})`)
-      const ticket = await query('tickets', 'select', {
-        filters: [{ column: 'id', value: recordId }],
-        single: true
-      })
-      console.log(`🔍 Ticket lookup result:`, ticket ? `Found (ID: ${ticket.id})` : 'Not found')
-      if (!ticket) {
-        console.error(`❌ Ticket not found: ${recordId}`)
-        return res.status(404).json({ 
-          message: 'Ticket not found',
-          ticketId: recordId,
-          error: 'The ticket may not exist or you may not have access to it'
+      if (!cloudinaryConfig.cloud_name || !cloudinaryConfig.api_key || !cloudinaryConfig.api_secret) {
+        return res.status(500).json({
+          message: 'File upload service not configured. Please contact administrator.',
+          error: 'Cloudinary credentials missing'
         })
       }
-      // RBAC: Users can only attach to their own tickets
-      if (req.user.role === 'user' && ticket.created_by !== req.user.id) {
-        console.error(`❌ Access denied: User ${req.user.id} trying to attach to ticket ${recordId} created by ${ticket.created_by}`)
-        return res.status(403).json({ message: 'Forbidden' })
-      }
-    } else if (recordType === 'incident') {
-      // Only Security Officer and Admin can attach to incidents
-      if (!['security_officer', 'admin'].includes(req.user.role)) {
-        return res.status(403).json({ message: 'Forbidden' })
-      }
-      const incident = await query('incidents', 'select', {
-        filters: [{ column: 'id', value: recordId }],
-        single: true
-      })
-      if (!incident) {
-        return res.status(404).json({ message: 'Incident not found' })
-      }
-    }
 
-    // Check Cloudinary configuration
-    if (!cloudinaryConfig.cloud_name || !cloudinaryConfig.api_key || !cloudinaryConfig.api_secret) {
-      console.error('Cloudinary not configured')
-      return res.status(500).json({ 
-        message: 'File upload service not configured. Please contact administrator.',
-        error: 'Cloudinary credentials missing'
-      })
-    }
-
-    // Upload to Cloudinary
-    let cloudinaryResult
-    try {
-      console.log(`Uploading file to Cloudinary: ${file.originalname} (${file.size} bytes)`)
-      // Convert buffer to data URI for Cloudinary
       const dataUri = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`
-      
-      // Upload to Cloudinary - make files publicly accessible
-      cloudinaryResult = await cloudinary.uploader.upload(dataUri, {
-        folder: `starkson/${recordType}s/${recordId}`,
-        resource_type: 'auto', // Auto-detect image, video, or raw
-        public_id: `${Date.now()}-${Math.round(Math.random() * 1E9)}`,
-        overwrite: false,
-        access_mode: 'public' // Make files publicly accessible
-      })
-      console.log(`✅ File uploaded to Cloudinary: ${cloudinaryResult.secure_url}`)
-    } catch (cloudinaryError) {
-      console.error('❌ Cloudinary upload error:', {
-        message: cloudinaryError.message,
-        http_code: cloudinaryError.http_code,
-        error: cloudinaryError
-      })
-      return res.status(500).json({ 
-        message: 'Failed to upload file to cloud storage', 
-        error: cloudinaryError.message || 'Unknown Cloudinary error',
-        details: cloudinaryError.http_code ? `HTTP ${cloudinaryError.http_code}` : undefined
-      })
-    }
 
-    // Store Cloudinary URL and public_id instead of local file path
-    let result
-    try {
-      result = await query('attachments', 'insert', {
+      let cloudinaryResult
+      try {
+        cloudinaryResult = await cloudinary.uploader.upload(dataUri, {
+          folder: `starkson/${recordType}s/${recordId}`,
+          resource_type: 'auto',
+          public_id: `${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+          overwrite: false,
+          access_mode: 'public'
+        })
+      } catch (cloudinaryError) {
+        console.error('Cloudinary upload error:', cloudinaryError)
+        return res.status(500).json({
+          message: 'Failed to upload file to cloud storage',
+          error: cloudinaryError.message || 'Unknown Cloudinary error'
+        })
+      }
+
+      let result
+      try {
+        result = await query('attachments', 'insert', {
+          data: {
+            record_type: recordType,
+            record_id: recordId,
+            filename: cloudinaryResult.public_id,
+            original_name: file.originalname,
+            mime_type: file.mimetype,
+            size: file.size,
+            file_path: cloudinaryResult.secure_url,
+            uploaded_by: req.user.id
+          }
+        })
+      } catch (dbError) {
+        try {
+          await cloudinary.uploader.destroy(cloudinaryResult.public_id)
+        } catch {}
+        return res.status(500).json({
+          message: 'Failed to save attachment to database',
+          error: dbError.message || 'Database error'
+        })
+      }
+
+      await query('audit_logs', 'insert', {
         data: {
-          record_type: recordType,
-          record_id: recordId,
-          filename: cloudinaryResult.public_id,
-          original_name: file.originalname,
-          mime_type: file.mimetype,
-          size: file.size,
-          file_path: cloudinaryResult.secure_url, // Store Cloudinary URL
-          uploaded_by: req.user.id
+          action: 'UPLOAD_ATTACHMENT',
+          user_id: req.user.id,
+          resource_type: recordType,
+          resource_id: recordId,
+          details: { filename: file.originalname, size: file.size }
         }
       })
-      console.log(`✅ Attachment saved to database: ${result.id}`)
-    } catch (dbError) {
-      console.error('❌ Database insert error:', dbError)
-      // Try to delete from Cloudinary if database insert fails
-      try {
-        await cloudinary.uploader.destroy(cloudinaryResult.public_id)
-        console.log('🗑️  Cleaned up Cloudinary file after DB error')
-      } catch (cleanupError) {
-        console.error('Failed to cleanup Cloudinary file:', cleanupError)
-      }
-      return res.status(500).json({ 
-        message: 'Failed to save attachment to database', 
-        error: dbError.message || 'Database error'
+
+      res.status(201).json({ message: 'File uploaded', attachmentId: result.id })
+    } catch (error) {
+      console.error('Upload attachment error:', error)
+      res.status(500).json({
+        message: 'Server error',
+        error: error.message || 'Unknown error'
       })
     }
-
-    // Log audit
-    await query('audit_logs', 'insert', {
-      data: {
-        action: 'UPLOAD_ATTACHMENT',
-        user_id: req.user.id,
-        resource_type: recordType,
-        resource_id: recordId,
-        details: { filename: file.originalname, size: file.size }
-      }
-    })
-
-    res.status(201).json({ message: 'File uploaded', attachmentId: result.id })
-  } catch (error) {
-    console.error('❌ Upload attachment error:', error)
-    res.status(500).json({ 
-      message: 'Server error', 
-      error: error.message || 'Unknown error',
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    })
   }
-})
+)
 
 // Get attachments for a record
 router.get('/:recordType/:recordId', authenticate, async (req, res) => {
   try {
     const { recordType, recordId } = req.params
 
-    // Verify access
     if (recordType === 'ticket') {
       const ticket = await query('tickets', 'select', {
         filters: [{ column: 'id', value: recordId }],
         single: true
       })
-      if (!ticket) {
-        return res.status(404).json({ message: 'Ticket not found' })
-      }
+      if (!ticket) return res.status(404).json({ message: 'Ticket not found' })
       if (req.user.role === 'user' && ticket.created_by !== req.user.id) {
         return res.status(403).json({ message: 'Forbidden' })
       }
@@ -424,23 +324,19 @@ router.get('/:recordType/:recordId', authenticate, async (req, res) => {
       }
     }
 
-    const { data: attachments, error } = await supabase
-      .from('attachments')
-      .select(`
-        *,
-        uploaded_by_user:users!attachments_uploaded_by_fkey(id, fullname)
-      `)
-      .eq('record_type', recordType)
-      .eq('record_id', recordId)
-      .order('created_at', { ascending: false })
+    const sql = `
+      SELECT
+        a.*,
+        u.fullname AS uploaded_by_fullname
+      FROM attachments a
+      LEFT JOIN users u ON u.id = a.uploaded_by
+      WHERE a.record_type = ?
+        AND a.record_id = ?
+      ORDER BY a.created_at DESC
+    `
+    const attachments = await runQuery(sql, [recordType, recordId])
 
-    if (error) {
-      console.error('Get attachments error:', error)
-      return res.status(500).json({ message: 'Server error' })
-    }
-
-    // Format response
-    const formattedAttachments = attachments.map(att => ({
+    const formatted = (attachments || []).map(att => ({
       id: att.id,
       recordType: att.record_type,
       recordId: att.record_id,
@@ -450,9 +346,8 @@ router.get('/:recordType/:recordId', authenticate, async (req, res) => {
       size: att.size,
       filePath: att.file_path,
       uploadedBy: att.uploaded_by,
-      uploadedByName: att.uploaded_by_user?.fullname || 'Unknown',
+      uploadedByName: att.uploaded_by_fullname || 'Unknown',
       createdAt: att.created_at,
-      // Also include snake_case for compatibility
       record_type: att.record_type,
       record_id: att.record_id,
       original_name: att.original_name,
@@ -462,29 +357,23 @@ router.get('/:recordType/:recordId', authenticate, async (req, res) => {
       created_at: att.created_at
     }))
 
-    res.json(formattedAttachments)
+    res.json(formatted)
   } catch (error) {
     console.error('Get attachments error:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })
 
-// View/Serve attachment (for images in img tags)
-// Note: This endpoint allows token in query string for img src tags
-// For Cloudinary URLs, we redirect to the Cloudinary URL
+// View attachment (with token)
 router.get('/view/:id', async (req, res) => {
   try {
-    // Get token from query string or header
     const token = req.query.token || req.headers.authorization?.replace('Bearer ', '')
-    if (!token) {
-      return res.status(401).json({ message: 'Unauthorized' })
-    }
+    if (!token) return res.status(401).json({ message: 'Unauthorized' })
 
-    // Verify token
     let decoded
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET)
-    } catch (error) {
+    } catch {
       return res.status(401).json({ message: 'Invalid token' })
     }
 
@@ -492,21 +381,14 @@ router.get('/view/:id', async (req, res) => {
       filters: [{ column: 'id', value: req.params.id }],
       single: true
     })
+    if (!attachment) return res.status(404).json({ message: 'Attachment not found' })
 
-    if (!attachment) {
-      return res.status(404).json({ message: 'Attachment not found' })
-    }
-
-    // Get ticket or incident to check access
     if (attachment.record_type === 'ticket') {
       const ticket = await query('tickets', 'select', {
         filters: [{ column: 'id', value: attachment.record_id }],
         single: true
       })
-      if (!ticket) {
-        return res.status(404).json({ message: 'Ticket not found' })
-      }
-      // RBAC check
+      if (!ticket) return res.status(404).json({ message: 'Ticket not found' })
       if (decoded.role === 'user' && ticket.created_by !== decoded.id) {
         return res.status(403).json({ message: 'Forbidden' })
       }
@@ -516,18 +398,15 @@ router.get('/view/:id', async (req, res) => {
       }
     }
 
-    // If file_path is a Cloudinary URL (starts with http), redirect to it
     if (attachment.file_path && attachment.file_path.startsWith('http')) {
       return res.redirect(attachment.file_path)
     }
 
-    // Fallback to local file system (for backward compatibility)
     const filePath = path.join(__dirname, '../', attachment.file_path)
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ message: 'File not found' })
     }
 
-    // Set appropriate content type and cache headers
     res.setHeader('Content-Type', attachment.mime_type || 'application/octet-stream')
     res.setHeader('Cache-Control', 'private, max-age=3600')
     res.sendFile(path.resolve(filePath))
@@ -544,21 +423,14 @@ router.get('/download/:id', authenticate, async (req, res) => {
       filters: [{ column: 'id', value: req.params.id }],
       single: true
     })
+    if (!attachment) return res.status(404).json({ message: 'Attachment not found' })
 
-    if (!attachment) {
-      return res.status(404).json({ message: 'Attachment not found' })
-    }
-
-    // Get ticket or incident to check access
     if (attachment.record_type === 'ticket') {
       const ticket = await query('tickets', 'select', {
         filters: [{ column: 'id', value: attachment.record_id }],
         single: true
       })
-      if (!ticket) {
-        return res.status(404).json({ message: 'Ticket not found' })
-      }
-      // RBAC check
+      if (!ticket) return res.status(404).json({ message: 'Ticket not found' })
       if (req.user.role === 'user' && ticket.created_by !== req.user.id) {
         return res.status(403).json({ message: 'Forbidden' })
       }
@@ -568,52 +440,37 @@ router.get('/download/:id', authenticate, async (req, res) => {
       }
     }
 
-    // If file_path is a Cloudinary URL, fetch and proxy it through our server
     if (attachment.file_path && attachment.file_path.startsWith('http')) {
       try {
-        console.log(`📥 Fetching file from Cloudinary: ${attachment.file_path}`)
-        // Fetch the file from Cloudinary
         const cloudinaryResponse = await fetch(attachment.file_path)
         if (!cloudinaryResponse.ok) {
-          console.error(`❌ Failed to fetch from Cloudinary: ${cloudinaryResponse.status} ${cloudinaryResponse.statusText}`)
-          return res.status(cloudinaryResponse.status).json({ 
+          return res.status(cloudinaryResponse.status).json({
             message: 'Failed to fetch file from cloud storage',
             error: `Cloudinary returned ${cloudinaryResponse.status}`
           })
         }
-        
-        // Get the file buffer
         const fileBuffer = await cloudinaryResponse.arrayBuffer()
         const buffer = Buffer.from(fileBuffer)
-        
-        console.log(`✅ File fetched from Cloudinary: ${buffer.length} bytes`)
-        
-        // Set appropriate headers
         res.setHeader('Content-Type', attachment.mime_type || 'application/octet-stream')
         res.setHeader('Content-Disposition', `attachment; filename="${attachment.original_name}"`)
         res.setHeader('Content-Length', buffer.length)
-        
-        // Send the file
-        res.send(buffer)
-        return
+        return res.send(buffer)
       } catch (fetchError) {
-        console.error('❌ Error fetching from Cloudinary:', fetchError)
-        return res.status(500).json({ 
+        console.error('Error fetching from Cloudinary:', fetchError)
+        return res.status(500).json({
           message: 'Failed to download file from cloud storage',
           error: fetchError.message
         })
       }
     }
 
-    // Fallback to local file system (for backward compatibility)
     const filePath = path.join(__dirname, '../', attachment.file_path)
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ message: 'File not found' })
     }
-
     res.download(filePath, attachment.original_name)
   } catch (error) {
-    console.error('❌ Download attachment error:', error)
+    console.error('Download attachment error:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })
@@ -625,28 +482,22 @@ router.delete('/:id', authenticate, async (req, res) => {
       filters: [{ column: 'id', value: req.params.id }],
       single: true
     })
-
     if (!attachment) {
       return res.status(404).json({ message: 'Attachment not found' })
     }
 
-    // Only admin or uploader can delete
     if (req.user.role !== 'admin' && attachment.uploaded_by !== req.user.id) {
       return res.status(403).json({ message: 'Forbidden' })
     }
 
-    // Delete file from Cloudinary or local storage
     if (attachment.file_path && attachment.file_path.startsWith('http')) {
-      // Delete from Cloudinary
       try {
-        const publicId = attachment.filename // Cloudinary public_id is stored in filename
+        const publicId = attachment.filename
         await cloudinary.uploader.destroy(publicId)
       } catch (cloudinaryError) {
         console.error('Cloudinary delete error:', cloudinaryError)
-        // Continue with database deletion even if Cloudinary delete fails
       }
     } else {
-      // Delete from local file system (for backward compatibility)
       const filePath = path.join(__dirname, '../', attachment.file_path)
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath)
@@ -657,7 +508,6 @@ router.delete('/:id', authenticate, async (req, res) => {
       filters: [{ column: 'id', value: req.params.id }]
     })
 
-    // Log audit
     await query('audit_logs', 'insert', {
       data: {
         action: 'DELETE_ATTACHMENT',

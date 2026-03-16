@@ -1,4 +1,4 @@
-const { supabase } = require('../config/database')
+const { query } = require('../config/database')
 const dotenv = require('dotenv')
 
 dotenv.config()
@@ -8,15 +8,10 @@ async function checkUsers() {
     console.log('🔍 Checking for IT Support users...\n')
     
     // Check IT Support users
-    const { data: itSupportUsers, error: itError } = await supabase
-      .from('users')
-      .select('id, fullname, username, role, status')
-      .eq('role', 'it_support')
-    
-    if (itError) {
-      console.error('❌ Error querying IT Support users:', itError)
-      return
-    }
+    const itSupportUsers = await query('users', 'select', {
+      select: 'id, fullname, username, role, status',
+      filters: [{ column: 'role', value: 'it_support' }]
+    })
     
     console.log(`📊 IT Support Users: ${itSupportUsers?.length || 0}`)
     if (itSupportUsers && itSupportUsers.length > 0) {
@@ -32,15 +27,10 @@ async function checkUsers() {
     console.log('\n🔍 Checking for Security Officers...\n')
     
     // Check Security Officers
-    const { data: securityOfficers, error: secError } = await supabase
-      .from('users')
-      .select('id, fullname, username, role, status')
-      .eq('role', 'security_officer')
-    
-    if (secError) {
-      console.error('❌ Error querying Security Officers:', secError)
-      return
-    }
+    const securityOfficers = await query('users', 'select', {
+      select: 'id, fullname, username, role, status',
+      filters: [{ column: 'role', value: 'security_officer' }]
+    })
     
     console.log(`📊 Security Officers: ${securityOfficers?.length || 0}`)
     if (securityOfficers && securityOfficers.length > 0) {

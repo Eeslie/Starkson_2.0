@@ -1,154 +1,187 @@
-const { createClient } = require('@supabase/supabase-js')
+const mysql = require('mysql2/promise')
 const dotenv = require('dotenv')
 
-dotenv.config()
+// Load environment variables from .env.local
+dotenv.config({ path: '.env.local' })
 
-// Initialize Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-)
+// Create a MySQL connection pool
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'starkson_db',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+})
 
-// Helper function to handle Supabase queries
+// For SELECT queries (returns rows)
+const runQuery = async (sql, params = []) => {
+  const [rows] = await pool.execute(sql, params)
+  return rows
+}
+
+// For INSERT/UPDATE/DELETE (returns raw result with insertId/affectedRows)
+const runExec = async (sql, params = []) => {
+  const [result] = await pool.execute(sql, params)
+  return result
+}
+
+const buildWhere = (filters = []) => {
+  if (!filters || filters.length === 0) return { clause: '', params: [] }
+  const parts = []
+  const params = []
+  for (const filter of filters) {
+    const op = filter.operator || 'eq'
+    const col = filter.column
+    switch (op) {
+      case 'eq':
+        parts.push(`${col} = ?`)
+        params.push(filter.value)
+        break
+      case 'neq':
+        parts.push(`${col} <> ?`)
+        params.push(filter.value)
+        break
+      case 'gt':
+        parts.push(`${col} > ?`)
+        params.push(filter.value)
+        break
+      case 'gte':
+        parts.push(`${col} >= ?`)
+        params.push(filter.value)
+        break
+      case 'lt':
+        parts.push(`${col} < ?`)
+        params.push(filter.value)
+        break
+      case 'lte':
+        parts.push(`${col} <= ?`)
+        params.push(filter.value)
+        break
+      case 'is':
+        if (filter.value === null) {
+          parts.push(`${col} IS NULL`)
+        } else {
+          parts.push(`${col} IS NOT NULL`)
+        }
+        break
+      case 'in':
+        if (Array.isArray(filter.value) && filter.value.length > 0) {
+          const placeholders = filter.value.map(() => '?').join(', ')
+          parts.push(`${col} IN (${placeholders})`)
+          params.push(...filter.value)
+        } else {
+          parts.push('1 = 0')
+        }
+        break
+      default:
+        parts.push(`${col} = ?`)
+        params.push(filter.value)
+        break
+    }
+  }
+  return {
+    clause: parts.length ? `WHERE ${parts.join(' AND ')}` : '',
+    params
+  }
+}
+
+// Generic helper that roughly mirrors the previous Supabase-based API
 const query = async (table, operation = 'select', options = {}) => {
   try {
-    let query = supabase.from(table)
-
-    // Handle different operations
     switch (operation) {
-      case 'select':
-        // Handle select with joins using foreign table syntax
-        if (options.select) {
-          query = query.select(options.select)
-        } else {
-          query = query.select('*')
+      case 'select': {
+        const columns = options.select || '*'
+        const { clause, params } = buildWhere(options.filters)
+        let sql = `SELECT ${columns} FROM ${table} ${clause}`
+
+        if (options.orderBy && options.orderBy.column) {
+          sql += ` ORDER BY ${options.orderBy.column} ${options.orderBy.ascending === false ? 'DESC' : 'ASC'}`
         }
-        
-        // Apply filters
-        if (options.filters) {
-          options.filters.forEach(filter => {
-            const operator = filter.operator || 'eq'
-            if (operator === 'in') {
-              query = query.in(filter.column, filter.value)
-            } else if (operator === 'is') {
-              query = query.is(filter.column, filter.value)
-            } else if (operator === 'or') {
-              // Handle OR conditions
-              const orConditions = filter.value.map(cond => `${cond.column}.${cond.operator || 'eq'}.${cond.value}`).join(',')
-              query = query.or(orConditions)
-            } else {
-              query = query[operator](filter.column, filter.value)
-            }
-          })
-        }
-        
-        // Apply ordering
-        if (options.orderBy) {
-          query = query.order(options.orderBy.column, { ascending: options.orderBy.ascending !== false })
-        }
-        
-        // Apply limit
         if (options.limit) {
-          query = query.limit(options.limit)
+          sql += ` LIMIT ${Number(options.limit)}`
         }
-        
-        // Execute query
+
+        const rows = await runQuery(sql, params)
         if (options.single) {
-          // Use maybeSingle() to return null instead of throwing error when not found
-          const { data, error } = await query.maybeSingle()
-          if (error) {
-            console.error(`Query error (${table}, single):`, error)
-            throw error
+          return rows[0] || null
+        }
+        return rows
+      }
+
+      case 'insert': {
+        const data = options.data
+        if (!data) throw new Error('insert operation requires options.data')
+        const rows = Array.isArray(data) ? data : [data]
+        if (rows.length === 0) return []
+        const columns = Object.keys(rows[0])
+        const placeholders = `(${columns.map(() => '?').join(', ')})`
+        const sql = `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${rows.map(() => placeholders).join(', ')}`
+        const params = rows.flatMap(row => columns.map(col => row[col]))
+        const result = await runExec(sql, params)
+
+        // If caller wants raw result (e.g. for bulk ops)
+        if (options.rawResult) {
+          return result
+        }
+
+        // If we inserted a single row and table has an auto-increment `id`, fetch the row back
+        if (!Array.isArray(data)) {
+          const insertedId = result.insertId
+          if (insertedId) {
+            const created = await query(table, 'select', {
+              filters: [{ column: 'id', value: insertedId }],
+              single: true
+            })
+            return created
           }
-          return data || null
         }
-        
-        const { data, error } = await query
-        if (error) {
-          console.error(`Query error (${table}):`, error)
-          throw error
-        }
-        return data
 
-      case 'insert':
-        const { data: insertData, error: insertError } = await supabase
-          .from(table)
-          .insert(options.data)
-          .select()
-        if (insertError) throw insertError
-        return Array.isArray(insertData) && insertData.length === 1 ? insertData[0] : insertData
+        // Fallback: return result object
+        return result
+      }
 
-      case 'update':
-        let updateQuery = supabase.from(table).update(options.data)
-        if (options.filters) {
-          options.filters.forEach(filter => {
-            const operator = filter.operator || 'eq'
-            if (operator === 'is') {
-              updateQuery = updateQuery.is(filter.column, filter.value)
-            } else {
-              updateQuery = updateQuery[operator](filter.column, filter.value)
-            }
-          })
-        }
-        const { data: updateData, error: updateError } = await updateQuery.select()
-        if (updateError) throw updateError
-        return Array.isArray(updateData) && updateData.length === 1 ? updateData[0] : updateData
+      case 'update': {
+        const data = options.data || {}
+        const setCols = Object.keys(data)
+        if (setCols.length === 0) return { affectedRows: 0 }
+        const setClause = setCols.map(col => `${col} = ?`).join(', ')
+        const setParams = setCols.map(col => data[col])
+        const { clause, params: whereParams } = buildWhere(options.filters)
+        const sql = `UPDATE ${table} SET ${setClause} ${clause}`
+        const result = await runExec(sql, [...setParams, ...whereParams])
+        return result
+      }
 
-      case 'delete':
-        let deleteQuery = supabase.from(table).delete()
-        if (options.filters) {
-          options.filters.forEach(filter => {
-            deleteQuery = deleteQuery[filter.operator || 'eq'](filter.column, filter.value)
-          })
-        }
-        const { error: deleteError } = await deleteQuery
-        if (deleteError) throw deleteError
-        return { success: true }
+      case 'delete': {
+        const { clause, params } = buildWhere(options.filters)
+        const sql = `DELETE FROM ${table} ${clause}`
+        const result = await runExec(sql, params)
+        return result
+      }
 
-      case 'count':
-        let countQuery = supabase.from(table).select('*', { count: 'exact', head: true })
-        if (options.filters) {
-          options.filters.forEach(filter => {
-            const operator = filter.operator || 'eq'
-            if (operator === 'in') {
-              countQuery = countQuery.in(filter.column, filter.value)
-            } else if (operator === 'is') {
-              countQuery = countQuery.is(filter.column, filter.value)
-            } else if (operator === 'gte') {
-              countQuery = countQuery.gte(filter.column, filter.value)
-            } else if (operator === 'lte') {
-              countQuery = countQuery.lte(filter.column, filter.value)
-            } else if (operator === 'gt') {
-              countQuery = countQuery.gt(filter.column, filter.value)
-            } else if (operator === 'lt') {
-              countQuery = countQuery.lt(filter.column, filter.value)
-            } else {
-              countQuery = countQuery[operator](filter.column, filter.value)
-            }
-          })
-        }
-        const { count, error: countError } = await countQuery
-        if (countError) throw countError
-        return { count: count || 0 }
+      case 'count': {
+        const { clause, params } = buildWhere(options.filters)
+        const sql = `SELECT COUNT(*) as count FROM ${table} ${clause}`
+        const rows = await runQuery(sql, params)
+        return { count: rows[0]?.count || 0 }
+      }
 
       default:
         throw new Error(`Unknown operation: ${operation}`)
     }
   } catch (error) {
-    console.error(`Supabase query error (${table}, ${operation}):`, error)
+    console.error(`MySQL query error (${table}, ${operation}):`, error)
     throw error
   }
 }
 
-// Raw SQL query helper (for complex queries via RPC)
-const rpc = async (functionName, params = {}) => {
-  const { data, error } = await supabase.rpc(functionName, params)
-  if (error) throw error
-  return data
+module.exports = {
+  pool,
+  runQuery,
+  runExec,
+  query
 }
 
-module.exports = {
-  supabase,
-  query,
-  rpc
-}
