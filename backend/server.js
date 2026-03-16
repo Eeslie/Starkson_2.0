@@ -12,7 +12,6 @@ const PORT = process.env.PORT || 5000
 const corsOptions = {
   origin: function (origin, callback) {
   const allowedOrigins = [
-    'https://starkson-afhs.onrender.com', 
     'http://localhost:3000', 
     'http://localhost:5173',
     'http://10.0.0.66:3000',

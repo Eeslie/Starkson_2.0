@@ -94,13 +94,11 @@ const calculateSLADue = async (priority) => {
   return dueDate.toISOString()
 }
 
+// IMPORTANT: Place more specific routes BEFORE parameterized routes
+// ================================================================
+
 // Get ticket by formatted ticket number (e.g., D01-000004)
 router.get('/number/:ticketNumber', authenticate, async (req, res) => {
-  console.log('========== TICKET NUMBER ROUTE HIT ==========')
-  console.log('Params:', req.params)
-  console.log('Ticket number:', req.params.ticketNumber)
-  console.log('User:', req.user)
-
   try {
     const { ticketNumber } = req.params
     const userId = req.user.id
@@ -114,14 +112,12 @@ router.get('/number/:ticketNumber', authenticate, async (req, res) => {
     })
 
     if (!ticket) {
-      console.log(`Ticket not found with number: ${ticketNumber}`)
       return res.status(404).json({ message: 'Ticket not found' })
     }
 
     // Check if user has access to this ticket
     if (userRole !== 'admin' && userRole !== 'super_admin') {
       if (ticket.created_by !== userId) {
-        console.log(`Access denied: user ${userId} tried to access ticket ${ticketNumber} created by ${ticket.created_by}`)
         return res.status(403).json({ message: 'Access denied' })
       }
     }
@@ -132,6 +128,42 @@ router.get('/number/:ticketNumber', authenticate, async (req, res) => {
     res.status(500).json({ message: 'Server error', error: error.message })
   }
 })
+
+// Get attachments for a ticket - MOVED BEFORE /:id route
+router.get('/attachments/:ticketId', authenticate, async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    
+    // First check if the ticket exists
+    const ticket = await query('tickets', 'select', {
+      filters: [{ column: 'id', value: ticketId }],
+      single: true
+    });
+
+    if (!ticket) {
+      return res.status(404).json({ message: 'Ticket not found' });
+    }
+
+    // Get attachments for this ticket
+    const attachments = await query('attachments', 'select', {
+      filters: [
+        { column: 'record_type', value: 'ticket' },
+        { column: 'record_id', value: ticketId }
+      ],
+      orderBy: { column: 'created_at', ascending: false }
+    });
+
+    console.log(`Found ${attachments?.length || 0} attachments for ticket ${ticketId}`);
+    res.json(attachments || []);
+  } catch (error) {
+    console.error('Get attachments error:', error);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message,
+      sqlMessage: error.sqlMessage 
+    });
+  }
+});
 
 // Get all tickets
 router.get('/', authenticate, async (req, res) => {
@@ -164,12 +196,7 @@ router.get('/', authenticate, async (req, res) => {
         conditions.push('(t.branch_acronym IS NULL OR t.branch_acronym IN (?))')
         params.push(userBranchAcronyms)
       }
-    } else if (role === 'it_support') {
-      if (!hasAllBranches && userBranchAcronyms.length > 0) {
-        conditions.push('(t.branch_acronym IS NULL OR t.branch_acronym IN (?))')
-        params.push(userBranchAcronyms)
-      }
-    } else if (role === 'security_officer') {
+    } else if (role === 'it_support' || role === 'security_officer') {
       if (!hasAllBranches && userBranchAcronyms.length > 0) {
         conditions.push('(t.branch_acronym IS NULL OR t.branch_acronym IN (?))')
         params.push(userBranchAcronyms)
@@ -263,7 +290,6 @@ router.get('/', authenticate, async (req, res) => {
         ])
 
         let assignedToName = ticket.assigned_to_fullname || null
-
         let createdByName = ticket.created_by_fullname || 'Unknown'
 
         let convertedIncidentId = null
@@ -311,7 +337,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 })
 
-// Get single ticket with details
+// Get single ticket with details - MOVED AFTER more specific routes
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const ticketId = req.params.id
@@ -414,13 +440,13 @@ router.get('/:id', authenticate, async (req, res) => {
       incidentTimeline = incidentTimeline || []
     }
 
-    // Attachments
+    // Get attachments
     const attachments = await query('attachments', 'select', {
       filters: [
         { column: 'record_type', value: 'ticket' },
         { column: 'record_id', value: ticketId }
       ]
-    })
+    });
 
     res.json({
       ...ticket,
@@ -471,14 +497,7 @@ router.get('/:id', authenticate, async (req, res) => {
         size: a.size,
         filePath: a.file_path,
         uploadedBy: a.uploaded_by,
-        createdAt: a.created_at,
-        record_type: a.record_type,
-        record_id: a.record_id,
-        original_name: a.original_name,
-        mime_type: a.mime_type,
-        file_path: a.file_path,
-        uploaded_by: a.uploaded_by,
-        created_at: a.created_at
+        createdAt: a.created_at
       }))
     })
   } catch (error) {
@@ -521,46 +540,51 @@ router.post('/', authenticate, authorize('user', 'admin'), async (req, res) => {
     const assignedToId = await findITSupportUser()
     console.log('🔍 Assignment check:', { assignedToId, ticketNumber })
 
+    // First, let's check what columns exist in the tickets table
+    // You need to run: DESCRIBE tickets;
+    
     const ticketData = {
       ticket_number: ticketNumber,
       branch_acronym: branchAcronym,
       request_type: requestType,
-      title,
-      description,
+      title: title,
+      description: description,
       affected_system: affectedSystem || null,
       priority: priority || 'medium',
       category: category || null,
       created_by: req.user.id,
       assigned_to: assignedToId,
       status: assignedToId ? 'assigned' : 'new',
-      sla_due: slaDue
+      sla_due: slaDue,
+      created_at: new Date(),
+      updated_at: new Date()
     }
 
-    console.log('💾 Inserting ticket:', { ...ticketData, assigned_to: assignedToId || 'NULL' })
+    console.log('💾 Attempting to insert ticket with data:', ticketData)
 
     const result = await query('tickets', 'insert', { data: ticketData })
 
-    console.log('✅ Ticket created:', {
+    console.log('✅ Ticket created successfully:', {
       id: result.id,
       ticketNumber: result.ticket_number,
       assigned_to: result.assigned_to || 'NULL',
       status: result.status
     })
 
-    // Log audit
+    // FIXED: Log audit - stringify the details object
     const auditPayload = {
       action: 'CREATE_TICKET',
       user_id: req.user.id,
       resource_type: 'ticket',
       resource_id: result.id,
-      details: {
+      details: JSON.stringify({
         ticket_number: ticketNumber,
         title,
         request_type: requestType,
         priority,
         branch_acronym: branchAcronym,
         assigned_to: assignedToId
-      }
+      })
     }
     await query('audit_logs', 'insert', { data: auditPayload })
 
@@ -612,7 +636,28 @@ router.post('/', authenticate, authorize('user', 'admin'), async (req, res) => {
     })
   } catch (error) {
     console.error('Create ticket error:', error)
-    res.status(500).json({ message: 'Server error' })
+    
+    // Provide more specific error message
+    if (error.sqlMessage) {
+      console.error('SQL Error:', error.sqlMessage);
+      
+      // Check for unknown column errors
+      if (error.sqlMessage.includes('Unknown column')) {
+        const match = error.sqlMessage.match(/Unknown column '([^']+)'/);
+        const badColumn = match ? match[1] : 'unknown';
+        return res.status(500).json({ 
+          message: `Database column mismatch: '${badColumn}' does not exist in tickets table`,
+          error: error.sqlMessage,
+          suggestion: 'Please check your tickets table structure and update the column names in the code'
+        });
+      }
+    }
+    
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message,
+      sqlMessage: error.sqlMessage 
+    })
   }
 })
 
@@ -687,13 +732,14 @@ router.put('/:id', authenticate, async (req, res) => {
       }
     }
 
+    // FIXED: Stringify details
     await query('audit_logs', 'insert', {
       data: {
         action: 'UPDATE_TICKET',
         user_id: req.user.id,
         resource_type: 'ticket',
         resource_id: req.params.id,
-        details: req.body
+        details: JSON.stringify(req.body)
       }
     })
 
@@ -708,13 +754,15 @@ router.put('/:id', authenticate, async (req, res) => {
           resource_id: req.params.id
         }
       })
+      
+      // FIXED: Stringify details
       await query('audit_logs', 'insert', {
         data: {
           action: 'TICKET_UPDATED',
           user_id: ticket.created_by,
           resource_type: 'ticket',
           resource_id: req.params.id,
-          details: { ticket_number: ticket.ticket_number }
+          details: JSON.stringify({ ticket_number: ticket.ticket_number })
         }
       })
     }
@@ -832,13 +880,14 @@ router.post('/:id/comments', authenticate, async (req, res) => {
       console.log('🔒 Internal note added - no notifications sent to users')
     }
 
+    // FIXED: Stringify details
     await query('audit_logs', 'insert', {
       data: {
         action: isInternal ? 'ADD_INTERNAL_NOTE' : 'ADD_COMMENT',
         user_id: req.user.id,
         resource_type: 'ticket',
         resource_id: req.params.id,
-        details: { is_internal: isInternal }
+        details: JSON.stringify({ is_internal: isInternal })
       }
     })
 
@@ -1041,17 +1090,19 @@ router.post('/:id/convert', authenticate, authorize('it_support', 'security_offi
           resource_id: result.id
         }
       })
+      
+      // FIXED: Stringify details
       await query('audit_logs', 'insert', {
         data: {
           action: 'TICKET_CONVERTED_TO_INCIDENT',
           user_id: ticket.created_by,
           resource_type: 'ticket',
           resource_id: ticket.id,
-          details: {
+          details: JSON.stringify({
             ticket_number: ticket.ticket_number,
             incident_number: incidentNumber,
             incident_id: result.id
-          }
+          })
         }
       })
     }
@@ -1079,13 +1130,14 @@ router.post('/:id/convert', authenticate, authorize('it_support', 'security_offi
       })
     }
 
+    // FIXED: Stringify details
     await query('audit_logs', 'insert', {
       data: {
         action: 'CONVERT_TICKET',
         user_id: req.user.id,
         resource_type: 'incident',
         resource_id: result.id,
-        details: { source_ticket_id: ticket.id }
+        details: JSON.stringify({ source_ticket_id: ticket.id })
       }
     })
 
@@ -1162,13 +1214,14 @@ router.delete('/:id', authenticate, async (req, res) => {
       filters: [{ column: 'id', value: req.params.id }]
     })
 
+    // FIXED: Stringify details
     await query('audit_logs', 'insert', {
       data: {
         action: 'DELETE_TICKET',
         user_id: req.user.id,
         resource_type: 'ticket',
         resource_id: req.params.id,
-        details: { ticket_number: ticket.ticket_number }
+        details: JSON.stringify({ ticket_number: ticket.ticket_number })
       }
     })
 
@@ -1241,24 +1294,6 @@ router.get('/:id/status', authenticate, async (req, res) => {
     res.json({ status: ticket.status })
   } catch (error) {
     console.error('Get status error:', error)
-    res.status(500).json({ message: 'Server error' })
-  }
-})
-
-// Attachments for a ticket
-router.get('/ticket/:ticketId', authenticate, async (req, res) => {
-  try {
-    const attachments = await query('attachments', 'select', {
-      filters: [
-        { column: 'record_type', value: 'ticket' },
-        { column: 'record_id', value: req.params.ticketId }
-      ],
-      orderBy: { column: 'created_at', ascending: false }
-    })
-
-    res.json(attachments || [])
-  } catch (error) {
-    console.error('Get attachments error:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })

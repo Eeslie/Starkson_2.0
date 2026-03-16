@@ -13,13 +13,14 @@ router.get('/:type', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'Invalid maintenance data type' })
     }
 
+    // Fix: Use key_name instead of type, and value_json instead of value
     const data = await query('maintenance_data', 'select', {
-      select: 'value',
-      filters: [{ column: 'type', value: type }],
-      orderBy: { column: 'value', ascending: true }
+      select: 'value_json',
+      filters: [{ column: 'key_name', value: type }],
+      orderBy: { column: 'value_json', ascending: true }
     })
 
-    const values = (data || []).map(item => item.value)
+    const values = (data || []).map(item => item.value_json)
     res.json(values)
   } catch (err) {
     console.error('Get maintenance data error:', err)
@@ -37,20 +38,22 @@ router.get('/:type', authenticate, async (req, res) => {
 // Get all maintenance data (all types)
 router.get('/', authenticate, async (req, res) => {
   try {
+    // Fix: Use key_name instead of type, and value_json instead of value
     const data = await query('maintenance_data', 'select', {
-      select: 'type, value',
-      orderBy: { column: 'type', ascending: true }
+      select: 'key_name, value_json',
+      orderBy: { column: 'key_name', ascending: true }
     })
 
-    // Group by type
+    // Group by key_name
     const grouped = {}
     ;(data || []).forEach(item => {
-      if (!grouped[item.type]) {
-        grouped[item.type] = []
+      if (!grouped[item.key_name]) {
+        grouped[item.key_name] = []
       }
-      grouped[item.type].push(item.value)
+      grouped[item.key_name].push(item.value_json)
     })
 
+    // Transform to match expected frontend format
     res.json({
       categories: grouped.category || [],
       affectedSystems: grouped.affected_system || [],
@@ -90,12 +93,12 @@ router.post('/:type', authenticate, authorize('admin'), async (req, res) => {
 
     const trimmedValue = value.trim()
 
-    // Check if already exists
+    // Fix: Check if already exists using key_name and value_json
     const existing = await query('maintenance_data', 'select', {
       select: 'id',
       filters: [
-        { column: 'type', value: type },
-        { column: 'value', value: trimmedValue }
+        { column: 'key_name', value: type },
+        { column: 'value_json', value: trimmedValue }
       ],
       single: true
     })
@@ -104,9 +107,14 @@ router.post('/:type', authenticate, authorize('admin'), async (req, res) => {
       return res.status(409).json({ message: `${type} "${trimmedValue}" already exists` })
     }
 
-    // Insert new value
+    // Fix: Insert using key_name and value_json
     const data = await query('maintenance_data', 'insert', {
-      data: { type, value: trimmedValue }
+      data: { 
+        key_name: type, 
+        value_json: trimmedValue,
+        created_at: new Date(),
+        updated_at: new Date()
+      }
     })
 
     res.status(201).json({ message: `${type} "${trimmedValue}" added successfully`, data })
@@ -143,10 +151,11 @@ router.delete('/:type/:value', authenticate, authorize('admin'), async (req, res
     // Decode the value (URL encoded)
     const decodedValue = decodeURIComponent(value)
 
+    // Fix: Delete using key_name and value_json
     await query('maintenance_data', 'delete', {
       filters: [
-        { column: 'type', value: type },
-        { column: 'value', value: decodedValue }
+        { column: 'key_name', value: type },
+        { column: 'value_json', value: decodedValue }
       ]
     })
 
