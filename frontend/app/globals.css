@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global body – ensures Tailwind and palette apply everywhere */
+body {
+  background-color: #f5f5f7;
+}
+
+/* Company palette: #f5f5f7 bg, white cards, gray-100 borders, blue (tickets) / red (incidents) accents */
+@layer components {
+  .panel-page {
+    @apply min-h-screen pt-20 lg:pt-8 px-4 lg:px-8 pb-8;
+    background-color: #f5f5f7;
+  }
+  .panel-card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-100 p-6;
+  }
+  .panel-card-title {
+    @apply text-sm font-medium text-gray-500 mb-1;
+  }
+  .panel-card-value {
+    @apply text-2xl lg:text-3xl font-bold text-gray-900;
+  }
+  .panel-section-title {
+    @apply text-lg font-bold text-gray-900 mb-4;
+  }
+
+  /* Shared form controls – neutral, fits company palette */
+  .input-field {
+    @apply w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 placeholder-gray-400;
+    @apply focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-300 transition-shadow duration-150;
+  }
+  .input-field-tickets {
+    @apply input-field focus:ring-blue-500 focus:border-blue-500;
+  }
+  .input-field-incidents {
+    @apply input-field focus:ring-red-500 focus:border-red-500;
+  }
+  .select-field {
+    @apply w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900;
+    @apply focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-300 transition-shadow duration-150;
+  }
+  .select-field-tickets {
+    @apply select-field focus:ring-blue-500 focus:border-blue-500;
+  }
+  .select-field-incidents {
+    @apply select-field focus:ring-red-500 focus:border-red-500;
+  }
+
+  /* Primary CTA – tickets (blue) / incidents (red) */
+  .btn-primary-tickets {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-medium text-white;
+    @apply bg-blue-600 hover:bg-blue-700 active:bg-blue-800 shadow-sm hover:shadow transition-all duration-200;
+  }
+  .btn-primary-incidents {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-medium text-white;
+    @apply bg-red-600 hover:bg-red-700 active:bg-red-800 shadow-sm hover:shadow transition-all duration-200;
+  }
+  /* Secondary / outline */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-medium;
+    @apply border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 active:bg-gray-100 transition-colors duration-200;
+  }
+  /* Pagination */
+  .btn-pagination {
+    @apply min-w-[2.25rem] px-3 py-2 rounded-lg text-sm font-medium border border-gray-200 bg-white text-gray-700;
+    @apply hover:bg-gray-50 disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150;
+  }
+  /* Status/severity pills */
+  .pill {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+}

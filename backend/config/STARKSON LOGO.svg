@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Transparent background by default -->
+
+  <!-- OUTLINE (remove this path if you want no black outline) -->
+  <path d="M206 64
+       C170 44, 86 44, 70 74
+       C56 100, 76 118, 122 126
+       C170 134, 190 144, 180 170
+       C168 208, 78 210, 50 190" fill="none" stroke="#000000" stroke-width="46" stroke-linecap="butt" stroke-linejoin="round" transform="skewX(-14) translate(30,0)"></path>
+
+  <!-- RED S -->
+  <path d="M206 64
+       C170 44, 86 44, 70 74
+       C56 100, 76 118, 122 126
+       C170 134, 190 144, 180 170
+       C168 208, 78 210, 50 190" fill="none" stroke="#E10600" stroke-width="34" stroke-linecap="butt" stroke-linejoin="round" transform="skewX(-14) translate(30,0)"></path>
+</svg>
